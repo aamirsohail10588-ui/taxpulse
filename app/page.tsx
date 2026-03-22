@@ -177,7 +177,9 @@ function getDueDates(today) {
   COMPLIANCE_RULES.forEach((rule) => {
     const addDeadline = (year, month) => {
       const due = new Date(year, month, rule.day);
-      const diff = Math.ceil((due - today) / (1000 * 60 * 60 * 24));
+      const diff = Math.ceil(
+        (due.getTime() - today.getTime()) / (1000 * 60 * 60 * 24),
+      );
       if (diff >= -5 && diff <= 60) {
         results.push({
           ...rule,
