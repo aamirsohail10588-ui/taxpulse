@@ -2,6 +2,38 @@
 
 import { useState, useEffect } from "react";
 
+type DeadlineItem = {
+  id: string;
+  label: string;
+  type: "GST" | "TDS" | "IT";
+  due: Date;
+  diff: number;
+  monthLabel: string;
+  status: "overdue" | "critical" | "urgent" | "upcoming" | "scheduled";
+  client: {
+    id: number;
+    name: string;
+  };
+  penalty: string;
+};
+
+type RawDeadline = {
+  id: string;
+  label: string;
+  type: "GST" | "TDS" | "IT";
+  day: number;
+  freq: string;
+  color: string;
+  penalty: string;
+};
+
+type GeneratedDeadline = RawDeadline & {
+  due: Date;
+  diff: number;
+  monthLabel: string;
+  status: "overdue" | "critical" | "urgent" | "upcoming" | "scheduled";
+};
+
 // ─── COMPLIANCE CALENDAR ───────────────────────────────────────────────
 // All major GST/TDS due dates for India FY 2025-26
 const COMPLIANCE_RULES = [
@@ -169,13 +201,13 @@ const MONTHS = [
   "Dec",
 ];
 
-function getDueDates(today) {
+function getDueDates(today: Date): GeneratedDeadline[] {
   const results = [];
   const y = today.getFullYear();
   const m = today.getMonth(); // 0-indexed
 
   COMPLIANCE_RULES.forEach((rule) => {
-    const addDeadline = (year, month) => {
+    const addDeadline = (year: number, month: number) => {
       const due = new Date(year, month, rule.day);
       const diff = Math.ceil(
         (due.getTime() - today.getTime()) / (1000 * 60 * 60 * 24),
@@ -217,7 +249,7 @@ function getDueDates(today) {
       addDeadline(y, 4);
   });
 
-  return results.sort((a, b) => a.diff - b.diff);
+  return results.sort((a, b) => Number(a.diff) - Number(b.diff));
 }
 
 const STATUS_CONFIG = {
@@ -311,7 +343,17 @@ const DEMO_CLIENTS = [
 
 // ─── MAIN APP ──────────────────────────────────────────────────────────
 export default function TaxPulse() {
-  const [clients, setClients] = useState(DEMO_CLIENTS);
+  type Client = {
+    id: number;
+    name: string;
+    gstin: string;
+    phone: string;
+    email: string;
+    filings: string[];
+  };
+
+  const [clients, setClients] = useState<Client[]>([]);
+
   const [activeTab, setActiveTab] = useState("dashboard");
   const [filterType, setFilterType] = useState("ALL");
   const [filterStatus, setFilterStatus] = useState("ALL");
@@ -319,7 +361,7 @@ export default function TaxPulse() {
   const [showAddClient, setShowAddClient] = useState(false);
   const [reminderSent, setReminderSent] = useState({});
   const [toast, setToast] = useState(null);
-  const [newClient, setNewClient] = useState({
+  const [newClient, setNewClient] = useState<Omit<Client, "id">>({
     name: "",
     gstin: "",
     phone: "",
@@ -327,17 +369,42 @@ export default function TaxPulse() {
     filings: [],
   });
 
-  const today = new Date(2026, 2, 22); // March 22 2026
+  useEffect(() => {
+    fetch("/api/clients")
+      .then((res) => res.json())
+      .then((data) => {
+        if (Array.isArray(data)) {
+          setClients(data);
+        } else {
+          console.error("Invalid API response:", data);
+          setClients([]);
+        }
+      })
+      .catch(() => setClients([]));
+  }, []);
+
+  const today = new Date();
   const allDeadlines = getDueDates(today);
 
   // Build client-deadline matrix
-  const clientDeadlines = clients
+  const clientDeadlines: DeadlineItem[] = clients
     .flatMap((client) =>
       allDeadlines
         .filter((d) => client.filings.includes(d.id))
         .map((d) => ({ ...d, client })),
     )
     .sort((a, b) => a.diff - b.diff);
+
+  const months = [...new Set(clientDeadlines.map((d) => d.monthLabel))].sort(
+    (a, b) => {
+      const [ma, ya] = a.split(" ");
+      const [mb, yb] = b.split(" ");
+      return (
+        new Date(`${ma} 1, ${ya}`).getTime() -
+        new Date(`${mb} 1, ${yb}`).getTime()
+      );
+    },
+  );
 
   const filtered = clientDeadlines.filter((d) => {
     const typeMatch = filterType === "ALL" || d.type === filterType;
@@ -388,18 +455,33 @@ export default function TaxPulse() {
     );
   };
 
-  const addClient = () => {
-    if (!newClient.name || !newClient.gstin) return;
-    setClients((prev) => [
-      ...prev,
-      {
+  const addClient = async () => {
+    if (!newClient.name || !newClient.gstin) {
+      showToast("Name and GSTIN required", "error");
+      return;
+    }
+
+    const res = await fetch("/api/clients", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
         ...newClient,
-        id: Date.now(),
         filings: newClient.filings.length
           ? newClient.filings
           : ["gstr1_monthly", "gstr3b_monthly"],
-      },
-    ]);
+      }),
+    });
+
+    if (!res.ok) {
+      showToast("Failed to add client", "error");
+      return;
+    }
+
+    const created = await res.json();
+    setClients((prev) => [created, ...prev]);
+
     setNewClient({ name: "", gstin: "", phone: "", email: "", filings: [] });
     setShowAddClient(false);
     showToast(`Client "${newClient.name}" added successfully`);
@@ -728,19 +810,20 @@ export default function TaxPulse() {
                 No deadlines match the selected filter.
               </div>
             )}
-            {filtered.map((item, i) => {
-              const sc = STATUS_CONFIG[item.status];
+            {filtered.map((item: DeadlineItem, i: number) => {
+              const sc =
+                STATUS_CONFIG[item.status as keyof typeof STATUS_CONFIG];
               const keyWA = `${item.client.id}-${item.id}-whatsapp`;
               const keyEM = `${item.client.id}-${item.id}-email`;
               const progress = Math.max(
                 0,
                 Math.min(
                   100,
-                  item.diff <= 0
+                  Number(item.diff) <= 0
                     ? 100
-                    : item.diff >= 30
+                    : Number(item.diff) >= 30
                       ? 5
-                      : 100 - (item.diff / 30) * 95,
+                      : 100 - (Number(item.diff) / 30) * 95,
                 ),
               );
               return (
@@ -1064,11 +1147,11 @@ export default function TaxPulse() {
                         }}
                         className="fadein"
                       >
-                        {cd.slice(0, 5).map((d, i) => {
+                        {cd.slice(0, 5).map((d) => {
                           const sc = STATUS_CONFIG[d.status];
                           return (
                             <div
-                              key={i}
+                              key={`${d.client.id}-${d.id}`}
                               style={{
                                 display: "flex",
                                 justifyContent: "space-between",
@@ -1110,7 +1193,7 @@ export default function TaxPulse() {
             <div style={{ fontSize: 11, color: "#3a4a5a", marginBottom: 16 }}>
               Upcoming compliance deadlines — next 60 days
             </div>
-            {["March 2026", "April 2026", "May 2026"].map((month) => {
+            {months.map((month) => {
               const monthDeadlines = clientDeadlines.filter(
                 (d) => d.monthLabel === month && d.diff >= 0,
               );
@@ -1142,7 +1225,7 @@ export default function TaxPulse() {
                   </div>
                   {[...new Set(monthDeadlines.map((d) => d.due.getDate()))]
                     .sort((a, b) => a - b)
-                    .map((day) => {
+                    .map((day: number) => {
                       const dayItems = monthDeadlines.filter(
                         (d) => d.due.getDate() === day,
                       );
